@@ -11,6 +11,7 @@ import (
 	jsoniter "github.com/json-iterator/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -25,8 +26,7 @@ type AMQPEndpointTestSuite struct {
 }
 
 func (suite *AMQPEndpointTestSuite) SetupTest() {
-	//suite.amqpUri = os.Getenv("AMQP_URI")
-	suite.amqpUri = "amqp://root:root@localhost:5672"
+	suite.amqpUri = os.Getenv("AMQP_URI")
 	suite.groupId = "amqp-test"
 }
 
