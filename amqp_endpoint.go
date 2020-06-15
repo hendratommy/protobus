@@ -9,10 +9,12 @@ import (
 
 // `PubSub` generator for given endpoint (uri)
 type AMQPEndpoint struct {
-	uri     string
-	groupId string
-	logger    watermill.LoggerAdapter
-	publisher *amqp.Publisher
+	uri             string
+	groupId         string
+	logger          watermill.LoggerAdapter
+	publisher       *amqp.Publisher
+	replyPublisher  *amqp.Publisher
+	replySubscriber *amqp.Subscriber
 }
 
 // Create new instance of AMQP endpoint. The AMQP Endpoint will create durable `PubSub` with `fanout` exchange type
@@ -56,6 +58,7 @@ func (endpoint *AMQPEndpoint) Subscriber(name string) (message.Subscriber, error
 
 // Return `Publisher` for this `Endpoint`. The `Publisher` will only created once and reused.
 func (endpoint *AMQPEndpoint) Publisher() (message.Publisher, error) {
+
 	if endpoint.publisher == nil {
 		publisher, err := amqp.NewPublisher(amqp.NewDurablePubSubConfig(endpoint.uri, nil), endpoint.logger)
 		if err != nil {
@@ -66,4 +69,37 @@ func (endpoint *AMQPEndpoint) Publisher() (message.Publisher, error) {
 
 	// reuse publisher
 	return endpoint.publisher, nil
+}
+
+// send reply message as `direct` to default
+func (endpoint *AMQPEndpoint) ReplyPublisher() (message.Publisher, error) {
+
+	if endpoint.replyPublisher == nil {
+		amqpConfig := amqp.NewNonDurableQueueConfig(endpoint.uri)
+		amqpConfig.Queue.AutoDelete = true
+
+		publisher, err := amqp.NewPublisher(amqpConfig, endpoint.logger)
+		if err != nil {
+			return nil, err
+		}
+		endpoint.replyPublisher = publisher
+	}
+
+	// reuse publisher
+	return endpoint.replyPublisher, nil
+}
+
+func (endpoint *AMQPEndpoint) ReplySubscriber() (message.Subscriber, error) {
+	if endpoint.replySubscriber == nil {
+		amqpConfig := amqp.NewNonDurableQueueConfig(endpoint.uri)
+		amqpConfig.Queue.AutoDelete = true
+
+		sub, err := amqp.NewSubscriber(amqpConfig, endpoint.logger)
+		if err != nil {
+			return nil, err
+		}
+		endpoint.replySubscriber = sub
+	}
+
+	return endpoint.replySubscriber, nil
 }

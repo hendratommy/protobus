@@ -1,5 +1,5 @@
 /**
-This source code is copied from `github.com/ThreeDotsLabs/watermill/message/wmrouter/middleware/poison.go`.
+This source code is copied from `github.com/ThreeDotsLabs/watermill/message/router/middleware/poison.go`.
 The purpose for this modification is to change headers and add more personalized changes (Poison to DeadLetter, etc).
 All credit belong to `ThreeDotsLabs`.
 **/
@@ -17,13 +17,7 @@ import (
 var ErrInvalidDeadLetterQueueTopic = errors.New("invalid dead letter queue topic")
 
 // Metadata keys which marks the reason and context why the message was deemed poisoned.
-const (
-	DeadLetterReason      = "DeadLetterReason"
-	DeadLetterStackTrace  = "DeadLetterStackTrace"
-	DeadLetterSourceTopic = "DeadLetterSourceTopic"
-	DeadLetterHandler     = "DeadLetterHandler"
-	DeadLetterSubscriber  = "DeadLetterSubscriber"
-)
+// See [constants.go](constants.go)
 
 type deadLetterQueue struct {
 	topic string
@@ -73,11 +67,11 @@ func (pq deadLetterQueue) publishPoisonMessage(msg *message.Message, err error) 
 	}
 
 	// add context why it was poisoned
-	msg.Metadata.Set(DeadLetterReason, err.Error())
-	msg.Metadata.Set(DeadLetterStackTrace, fmt.Sprintf("%+v", err))
-	msg.Metadata.Set(DeadLetterSourceTopic, message.SubscribeTopicFromCtx(msg.Context()))
-	msg.Metadata.Set(DeadLetterHandler, message.HandlerNameFromCtx(msg.Context()))
-	msg.Metadata.Set(DeadLetterSubscriber, message.SubscriberNameFromCtx(msg.Context()))
+	msg.Metadata.Set(HeaderDeadLetterReason, err.Error())
+	msg.Metadata.Set(HeaderDeadLetterStackTrace, fmt.Sprintf("%+v", err))
+	msg.Metadata.Set(HeaderDeadLetterSourceTopic, message.SubscribeTopicFromCtx(msg.Context()))
+	msg.Metadata.Set(HeaderDeadLetterHandler, message.HandlerNameFromCtx(msg.Context()))
+	msg.Metadata.Set(HeaderDeadLetterSubscriber, message.SubscriberNameFromCtx(msg.Context()))
 
 	// don't intercept error from publish. Can't help you if the publisher is down as well.
 	return pq.pub.Publish(pq.topic, msg)
