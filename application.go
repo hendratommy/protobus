@@ -17,6 +17,7 @@ type ErrorHandler struct {
 	// Dead Letter Queue (aka. Poison Queue)
 	// Function to generate dead letter queue name, if it's nil then no dead letter will be configured.
 	DeadLetterNameFunc func(topic string) string
+	DeadLetterFilter func(err error) bool
 }
 
 // ProtoBus ProtoBusApplication. An facade that export only a fine grained property/functions,
@@ -165,7 +166,14 @@ func (app *Application) OnEvent(event string, handler func(Ctx) error) error {
 		if app.errorHandler.DeadLetterNameFunc != nil {
 			// configure DLQ
 			dlqName := app.errorHandler.DeadLetterNameFunc(event)
-			dlq, err := DeadLetterQueue(publisher, dlqName)
+			var dlq message.HandlerMiddleware
+
+			if app.errorHandler.DeadLetterFilter != nil {
+				dlq, err = DeadLetterQueueWithFilter(publisher, dlqName, app.errorHandler.DeadLetterFilter)
+			} else {
+				dlq, err = DeadLetterQueue(publisher, dlqName)
+			}
+
 			if err != nil {
 				log.Fatalf("error when configuring DeadLetterQueue: %+v", err)
 			}
@@ -250,7 +258,13 @@ func (app *Application) OnRequest(topic string, handler func(Ctx) (interface{}, 
 		if app.errorHandler.DeadLetterNameFunc != nil {
 			// configure DLQ
 			dlqName := topic + "-DLQ"
-			dlq, err := DeadLetterQueue(publisher, dlqName)
+			var dlq message.HandlerMiddleware
+
+			if app.errorHandler.DeadLetterFilter != nil {
+				dlq, err = DeadLetterQueueWithFilter(publisher, dlqName, app.errorHandler.DeadLetterFilter)
+			} else {
+				dlq, err = DeadLetterQueue(publisher, dlqName)
+			}
 			if err != nil {
 				log.Fatalf("error when configuring DeadLetterQueue: %+v", err)
 			}

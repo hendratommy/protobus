@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/ThreeDotsLabs/watermill"
+	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/ThreeDotsLabs/watermill/message/router/middleware"
 	"github.com/hendratommy/protobus/marshaler"
+	jsoniter "github.com/json-iterator/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"sync"
@@ -14,19 +16,18 @@ import (
 	"time"
 )
 
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
+
 type AMQPEndpointTestSuite struct {
 	suite.Suite
 	amqpUri string
 	groupId string
-	logger watermill.LoggerAdapter
 }
 
 func (suite *AMQPEndpointTestSuite) SetupTest() {
 	//suite.amqpUri = os.Getenv("AMQP_URI")
 	suite.amqpUri = "amqp://root:root@localhost:5672"
 	suite.groupId = "amqp-test"
-	suite.logger = watermill.NopLogger{}
-	//suite.logger = watermill.NewStdLogger(true, false)
 }
 
 func TestAMQPEndpointTestSuite(t *testing.T) {
@@ -49,32 +50,33 @@ func sumIt(n int) int {
 
 func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_Std() {
 	topic := "TestAMQPEndpoint_Std_Received"
+	logger := watermill.NopLogger{}
 
 	type RequestData struct {
 		Name string
-		Val int
+		Val  int
 	}
 
-	amqpEndpoint, err := NewAMQPEndpoint(suite.amqpUri, suite.groupId, suite.logger)
+	amqpEndpoint, err := NewAMQPEndpoint(suite.amqpUri, suite.groupId, logger)
 	failTestOnError(suite.T(), err)
 
 	var wg sync.WaitGroup
 	var mux sync.Mutex
 	var sum int
 
-	app := New(amqpEndpoint, marshaler.JsonMarshaler{}, suite.logger)
+	app := New(amqpEndpoint, marshaler.JsonMarshaler{}, logger)
 
 	app.OnEvent(topic, func(ctx Ctx) error {
 		defer func() {
 			wg.Done()
 			mux.Unlock()
 		}()
-		var data  = RequestData{}
+		var data = RequestData{}
 		ctx.Parse(&data)
 
 		assert.Equal(suite.T(), "john doe", data.Name)
 
-		if data.Val % 2 == 0 {
+		if data.Val%2 == 0 {
 			assert.NotEmpty(suite.T(), ctx.Header("CorrelationId"))
 		}
 
@@ -94,7 +96,7 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_Std() {
 			Val:  i,
 		}
 
-		if i % 2 == 0 {
+		if i%2 == 0 {
 			headers := make(map[string]string)
 			headers["CorrelationId"] = watermill.NewUUID()
 			go app.Send(topic, data, headers)
@@ -111,13 +113,14 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_Std() {
 
 func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_CompetingConsumer() {
 	topic := "TestAMQPEndpoint_CompetingConsumer_Received"
+	logger := watermill.NopLogger{}
 
 	type RequestData struct {
 		Name string
-		Val int
+		Val  int
 	}
 
-	amqpEndpoint, err := NewAMQPEndpoint(suite.amqpUri, suite.groupId, suite.logger)
+	amqpEndpoint, err := NewAMQPEndpoint(suite.amqpUri, suite.groupId, logger)
 	failTestOnError(suite.T(), err)
 
 	var wg sync.WaitGroup
@@ -127,7 +130,7 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_CompetingConsumer() {
 	var endpoint *Application
 
 	for i := 0; i < num; i++ {
-		app := New(amqpEndpoint, marshaler.JsonMarshaler{}, suite.logger)
+		app := New(amqpEndpoint, marshaler.JsonMarshaler{}, logger)
 
 		if i == 0 {
 			endpoint = app
@@ -138,14 +141,14 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_CompetingConsumer() {
 				wg.Done()
 				mux.Unlock()
 			}()
-			var data  = RequestData{}
+			var data = RequestData{}
 			ctx.Parse(&data)
 
 			//log.Printf("%s receive message: %s", ctx.Header("RouteId"), ctx.Payload())
 
 			assert.Equal(suite.T(), "john doe", data.Name)
 
-			if data.Val % 2 == 0 {
+			if data.Val%2 == 0 {
 				assert.NotEmpty(suite.T(), ctx.Header("CorrelationId"))
 			}
 
@@ -166,7 +169,7 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_CompetingConsumer() {
 			Val:  i,
 		}
 
-		if i % 2 == 0 {
+		if i%2 == 0 {
 			headers := make(map[string]string)
 			headers["CorrelationId"] = watermill.NewUUID()
 			go endpoint.Send(topic, data, headers)
@@ -182,29 +185,31 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_CompetingConsumer() {
 }
 
 func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_Estafet() {
+	logger := watermill.NopLogger{}
+
 	topic1 := "TestAMQPEndpoint_Estafet_Received"
 	topic2 := "TestAMQPEndpoint_Estafet_Propagated"
 
 	type RequestData struct {
 		Name string
-		Val int
+		Val  int
 	}
 
-	amqpEndpoint, err := NewAMQPEndpoint(suite.amqpUri, suite.groupId, suite.logger)
+	amqpEndpoint, err := NewAMQPEndpoint(suite.amqpUri, suite.groupId, logger)
 	failTestOnError(suite.T(), err)
 
 	var wg sync.WaitGroup
 	var mux sync.Mutex
 	var sum int
 
-	app := New(amqpEndpoint, marshaler.JsonMarshaler{}, suite.logger)
+	app := New(amqpEndpoint, marshaler.JsonMarshaler{}, logger)
 	app.OnEvent(topic1, func(ctx Ctx) error {
-		var data  = RequestData{}
+		var data = RequestData{}
 		ctx.Parse(&data)
 
 		assert.Equal(suite.T(), "john doe", data.Name)
 
-		if data.Val % 2 == 0 {
+		if data.Val%2 == 0 {
 			assert.NotEmpty(suite.T(), ctx.Header("CorrelationId"))
 		}
 
@@ -216,19 +221,19 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_Estafet() {
 		return nil
 	})
 
-	app2 := New(amqpEndpoint, marshaler.JsonMarshaler{}, suite.logger)
+	app2 := New(amqpEndpoint, marshaler.JsonMarshaler{}, logger)
 	app2.OnEvent(topic2, func(ctx Ctx) error {
 		defer func() {
 			wg.Done()
 			mux.Unlock()
 		}()
-		var data  = RequestData{}
+		var data = RequestData{}
 		ctx.Parse(&data)
 
 		assert.Equal(suite.T(), "john doe", data.Name)
 
 		// because val is decremented in topic1
-		if data.Val % 2 == 1 {
+		if data.Val%2 == 1 {
 			assert.NotEmpty(suite.T(), ctx.Header("CorrelationId"))
 		}
 
@@ -249,7 +254,7 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_Estafet() {
 			Val:  i,
 		}
 
-		if i % 2 == 0 {
+		if i%2 == 0 {
 			headers := make(map[string]string)
 			headers["CorrelationId"] = watermill.NewUUID()
 			go app.Send(topic1, data, headers)
@@ -264,30 +269,30 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_Estafet() {
 	assert.Equal(suite.T(), sumIt(n)-n, sum)
 }
 
-
 func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_DLQ() {
+	logger := watermill.NopLogger{}
 	topic := "TestAMQPEndpoint_DLQ_Received"
 
 	type RequestData struct {
 		Name string
-		Val int
+		Val  int
 	}
 
-	amqpEndpoint, err := NewAMQPEndpoint(suite.amqpUri, suite.groupId, suite.logger)
+	amqpEndpoint, err := NewAMQPEndpoint(suite.amqpUri, suite.groupId, logger)
 	failTestOnError(suite.T(), err)
 
 	var wg sync.WaitGroup
 	var mux sync.Mutex
 	var sum int
 
-	app := New(amqpEndpoint, marshaler.JsonMarshaler{}, suite.logger)
+	app := New(amqpEndpoint, marshaler.JsonMarshaler{}, logger)
 	app.SetErrorHandler(&ErrorHandler{
-		Retry:              &middleware.Retry{
-			MaxRetries:          3,
-			InitialInterval:     time.Millisecond * 100,
-			MaxInterval:         time.Second * 3,
-			MaxElapsedTime:      time.Second * 5,
-			Logger:              suite.logger,
+		Retry: &middleware.Retry{
+			MaxRetries:      3,
+			InitialInterval: time.Millisecond * 100,
+			MaxInterval:     time.Second * 3,
+			MaxElapsedTime:  time.Second * 5,
+			Logger:          logger,
 		},
 		DeadLetterNameFunc: func(topic string) string {
 			return topic + "-DLQ"
@@ -298,17 +303,17 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_DLQ() {
 		return errors.New("test-DLQ")
 	})
 
-	app.OnEvent(topic + "-DLQ", func(ctx Ctx) error {
+	app.OnEvent(topic+"-DLQ", func(ctx Ctx) error {
 		defer func() {
 			wg.Done()
 			mux.Unlock()
 		}()
-		var data  = RequestData{}
+		var data = RequestData{}
 		ctx.Parse(&data)
 
 		assert.Equal(suite.T(), "john doe", data.Name)
 
-		if data.Val % 2 == 0 {
+		if data.Val%2 == 0 {
 			assert.NotEmpty(suite.T(), ctx.Header("CorrelationId"))
 		}
 
@@ -328,7 +333,7 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_DLQ() {
 			Val:  i,
 		}
 
-		if i % 2 == 0 {
+		if i%2 == 0 {
 			headers := make(map[string]string)
 			headers["CorrelationId"] = watermill.NewUUID()
 			go app.Send(topic, data, headers)
@@ -342,33 +347,135 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_DLQ() {
 	assert.Equal(suite.T(), sumIt(n), sum)
 }
 
-func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_RequestResponse() {
-	topic := "TestAMQPEndpoint_ReqRes_Received"
+func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_DLQFilter() {
+	logger := watermill.NopLogger{}
+	topic := "TestAMQPEndpoint_DLQFilter_Received"
 
 	type RequestData struct {
 		Name string
-		Val int
+		Val  int
 	}
 
-	type ResponseData struct {
-		Message string
-		Sum int
-	}
-
-	amqpEndpoint, err := NewAMQPEndpoint(suite.amqpUri, suite.groupId, suite.logger)
+	amqpEndpoint, err := NewAMQPEndpoint(suite.amqpUri, suite.groupId, logger)
 	failTestOnError(suite.T(), err)
 
 	var wg sync.WaitGroup
 	var mux sync.Mutex
 	var sum int
 
-	app := New(amqpEndpoint, marshaler.JsonMarshaler{}, suite.logger)
+	app := New(amqpEndpoint, marshaler.JsonMarshaler{}, logger)
+	app.SetErrorHandler(&ErrorHandler{
+		Retry: &middleware.Retry{
+			MaxRetries:      3,
+			InitialInterval: time.Millisecond * 100,
+			MaxInterval:     time.Second * 3,
+			MaxElapsedTime:  time.Second * 5,
+			Logger:          logger,
+		},
+		DeadLetterNameFunc: func(topic string) string {
+			return topic + "-DLQ"
+		},
+		DeadLetterFilter: func(err error) bool {
+			//goToDLQ := err.Error() == "test-DLQ"
+			//
+			//if !goToDLQ {
+			//	wg.Done()
+			//}
+
+			return true
+		},
+	})
+
+	app.OnEvent(topic, func(ctx Ctx) error {
+		var data = RequestData{}
+		ctx.Parse(&data)
+		if data.Val%2 == 0 {
+			return errors.New("test-DLQ")
+		} else {
+			return errors.New("skip-DLQ")
+		}
+
+	})
+
+	app.OnEvent(topic+"-DLQ", func(ctx Ctx) error {
+		defer func() {
+			wg.Done()
+			mux.Unlock()
+		}()
+		var data = RequestData{}
+		ctx.Parse(&data)
+
+		if data.Val%2 == 0 {
+			assert.NotEmpty(suite.T(), ctx.Header("CorrelationId"))
+		}
+
+		assert.Equal(suite.T(), "john doe", data.Name)
+
+		mux.Lock()
+		sum += data.Val
+		return nil
+	})
+
+	ctx := context.Background()
+	go app.Start(ctx)
+
+	n := 25
+	for i := 1; i <= n; i++ {
+		wg.Add(1)
+		data := RequestData{
+			Name: "john doe",
+			Val:  i,
+		}
+
+		if i%2 == 0 {
+			headers := make(map[string]string)
+			headers["CorrelationId"] = watermill.NewUUID()
+			go app.Send(topic, data, headers)
+		} else {
+			go app.Send(topic, data)
+		}
+	}
+
+	wg.Wait()
+
+	//oddSum := 0
+	//for i := 1; i <= n; i++ {
+	//	if i % 2 == 1 {
+	//		oddSum += i
+	//	}
+	//}
+
+	assert.Equal(suite.T(), sumIt(n), sum)
+}
+
+func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_RequestResponse() {
+	logger := watermill.NopLogger{}
+	topic := "TestAMQPEndpoint_RequestResponse"
+
+	type RequestData struct {
+		Name string
+		Val  int
+	}
+
+	type ResponseData struct {
+		Message string
+		Sum     int
+	}
+
+	amqpEndpoint, err := NewAMQPEndpoint(suite.amqpUri, suite.groupId, logger)
+	failTestOnError(suite.T(), err)
+
+	var wg sync.WaitGroup
+	var mux sync.Mutex
+	var sum int
+
+	app := New(amqpEndpoint, marshaler.JsonMarshaler{}, logger)
 
 	app.OnRequest(topic, func(ctx Ctx) (interface{}, error) {
 		defer func() {
 			mux.Unlock()
 		}()
-		var data  = RequestData{}
+		var data = RequestData{}
 		ctx.Parse(&data)
 
 		assert.Equal(suite.T(), "john doe", data.Name)
@@ -413,46 +520,82 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_RequestResponse() {
 	assert.Equal(suite.T(), sumIt(n), sum)
 }
 
-/*
-func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_Queue() {
-	topic := "TestAMQPEndpoint_Queue_Received"
-	//topic := "amq.rabbitmq.reply-to"
+func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_StarsRequestResponse() {
+	logger := watermill.NopLogger{}
+	topic := "TestAMQPEndpoint_StarsRequestResponse"
 
-	amqpConfig := amqp.NewNonDurableQueueConfig(suite.amqpUri)
-	amqpConfig.Queue.AutoDelete = true
-
-	subscriber, err := amqp.NewSubscriber(
-		amqpConfig,
-		watermill.NewStdLogger(false, false),
-	)
-	if err != nil {
-		panic(err)
+	type Data struct {
+		Line string
 	}
 
-	messages, err := subscriber.Subscribe(context.Background(), topic)
-	if err != nil {
-		panic(err)
-	}
+	var wg sync.WaitGroup
 
-	process := func(messages <-chan *message.Message) {
-		for msg := range messages {
-			log.Printf("received message: %s, payload: %s, headers: %+v", msg.UUID, string(msg.Payload), msg.Metadata)
-			msg.Ack()
+	starsHandler := func(x int) func(Ctx) (interface{}, error) {
+		return func(ctx Ctx) (interface{}, error) {
+			var data = Data{}
+			ctx.Parse(&data)
+
+			req := Data{
+				Line: fmt.Sprintf("%s%d", data.Line, x),
+			}
+
+			respCtx, err := ctx.SendAndWait(fmt.Sprintf("%s_%d", topic, x+1), req)
+			assert.NoError(suite.T(), err)
+
+			var respData = Data{}
+			respCtx.Parse(&respData)
+
+			return respData, nil
 		}
 	}
 
-	go process(messages)
+	t := 5
+	for i := 1; i < t; i++ {
+		amqpEndpoint, _ := NewAMQPEndpoint(suite.amqpUri, suite.groupId, logger)
+		app := New(amqpEndpoint, marshaler.JsonMarshaler{}, logger)
+		app.OnRequest(fmt.Sprintf("%s_%d", topic, i), starsHandler(i))
+		ctx := context.Background()
+		go app.Start(ctx)
+	}
+	// final endpoint
+	amqpEndpoint, _ := NewAMQPEndpoint(suite.amqpUri, suite.groupId, logger)
+	app := New(amqpEndpoint, marshaler.JsonMarshaler{}, logger)
+	app.OnRequest(fmt.Sprintf("%s_%d", topic, 5), func(ctx Ctx) (interface{}, error) {
+		var data = Data{}
+		ctx.Parse(&data)
 
-	select {
+		req := Data{
+			Line: fmt.Sprintf("%s%d", data.Line, t),
+		}
 
+		return req, nil
+	})
+	ctx := context.Background()
+	go app.Start(ctx)
+
+	client, err := NewAMQPEndpoint(suite.amqpUri, "client", logger)
+	assert.NoError(suite.T(), err)
+	n := 5
+	for i := 1; i <= n; i++ {
+		wg.Add(1)
+
+		go func() {
+			data := Data{
+				Line: RandString(3),
+			}
+
+			b, _ := json.Marshal(data)
+			// start at 1
+			resMsg, err := client.SendAndWait(fmt.Sprintf("%s_%d", topic, 1), message.NewMessage(watermill.NewUUID(), b))
+			assert.NoError(suite.T(), err)
+
+			var resp Data
+			json.Unmarshal(resMsg.Payload, &resp)
+
+			assert.Equal(suite.T(), fmt.Sprintf("%s%s", data.Line, "12345"), resp.Line)
+			wg.Done()
+		}()
 	}
 
-	//publisher, err := amqp.NewPublisher(amqpConfig, watermill.NewStdLogger(false, false))
-	//if err != nil {
-	//	panic(err)
-	//}
-	//
-	//publishMessages(publisher)
-
+	wg.Wait()
 }
- */
