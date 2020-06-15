@@ -15,10 +15,10 @@ type Endpoint interface {
 }
 
 type RPCServerEndpoint interface {
-	// Return new Subscriber for RPC Server listening to
+	// Return Subscriber for RPC Server listening to
 	RPCServerSubscriber()  (message.Subscriber, error)
-	// Return Publisher for RPC Server to reply messages
-	RPCServerPublisher() (message.Publisher, error)
+	// Publish reply message
+	RPCServerPublish(topic string, msg *message.Message) error
 }
 
 type RPCClientEndpoint interface {

@@ -127,12 +127,12 @@ func (app *Application) SendAndWait(topic string, payload interface{}, metadata 
 func (app *Application) OnEvent(event string, handler func(Ctx) error) error {
 	subscriber, err := app.endpoint.Subscriber(event)
 	if err != nil {
-		return err
+		log.Fatalf("error when configuring event subscriber: %+v", err)
 	}
 
 	publisher, err := app.endpoint.Publisher()
 	if err != nil {
-		return err
+		log.Fatalf("error when configuring event publisher: %+v", err)
 	}
 
 	routeId := fmt.Sprintf("%s_%s", event, RandString())
@@ -167,7 +167,7 @@ func (app *Application) OnEvent(event string, handler func(Ctx) error) error {
 			dlqName := app.errorHandler.DeadLetterNameFunc(event)
 			dlq, err := DeadLetterQueue(publisher, dlqName)
 			if err != nil {
-				return err
+				log.Fatalf("error when configuring DeadLetterQueue: %+v", err)
 			}
 			internalHandler.AddMiddleware(dlq)
 		}
@@ -186,17 +186,17 @@ func (app *Application) OnEvent(event string, handler func(Ctx) error) error {
 func (app *Application) OnRequest(topic string, handler func(Ctx) (interface{}, error)) error {
 	rpcServerEndpoint, ok := app.endpoint.(RPCServerEndpoint)
 	if !ok {
-		return fmt.Errorf("endpoint doesn't implement RPCServerEndpoint: %+v", app.endpoint.String())
+		log.Fatalf("endpoint doesn't implement RPCServerEndpoint: %+v", app.endpoint.String())
 	}
 
 	subscriber, err := rpcServerEndpoint.RPCServerSubscriber()
 	if err != nil {
-		return err
+		log.Fatalf("error when configuring RPCServerSubscriber: %+v", err)
 	}
 
-	publisher, err := rpcServerEndpoint.RPCServerPublisher()
+	publisher, err := app.endpoint.Publisher()
 	if err != nil {
-		return err
+		log.Fatalf("error when getting default Publisher: %+v", err)
 	}
 
 	routeId := fmt.Sprintf("%s_%s", topic, RandString())
@@ -227,9 +227,21 @@ func (app *Application) OnRequest(topic string, handler func(Ctx) (interface{}, 
 			if replyTo == "" {
 				return nil, fmt.Errorf("cannot send reply since header %s is missing", HeaderReplyTo)
 			}
-			c.
-			publisher.Publish(topic, reply)
-			return nil, nil
+
+			//
+			b, err := app.marshaler.Marshal(reply)
+			if err != nil {
+				return nil, err
+			}
+
+			replyMsg := message.NewMessage(watermill.NewUUID(), b)
+
+			if c.Headers() != nil && len(c.Headers()) > 0 {
+				replyMsg.Metadata = c.Headers()
+			}
+
+			err = rpcServerEndpoint.RPCServerPublish(topic, replyMsg)
+			return nil, err
 		},
 	)
 
@@ -240,7 +252,7 @@ func (app *Application) OnRequest(topic string, handler func(Ctx) (interface{}, 
 			dlqName := topic + "-DLQ"
 			dlq, err := DeadLetterQueue(publisher, dlqName)
 			if err != nil {
-				return err
+				log.Fatalf("error when configuring DeadLetterQueue: %+v", err)
 			}
 			internalHandler.AddMiddleware(dlq)
 		}

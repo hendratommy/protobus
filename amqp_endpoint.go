@@ -16,13 +16,13 @@ const (
 // `PubSub` generator for given endpoint (uri)
 // Should implement Endpoint, RPCServer and RPCCLient
 type AMQPEndpoint struct {
-	id              string
-	uri             string
-	groupId         string
-	logger          watermill.LoggerAdapter
-	publisher       *amqp.Publisher
-	topicSubscriber *amqp.Subscriber
-	topicPublisher  *amqp.Publisher
+	id                  string
+	uri                 string
+	groupId             string
+	logger              watermill.LoggerAdapter
+	publisher           *amqp.Publisher
+	rpcServerSubscriber *amqp.Subscriber
+	rpcClientPublisher  *amqp.Publisher
 }
 
 // Create new instance of AMQP endpoint. The AMQP Endpoint will create durable `PubSub` with `fanout` exchange type
@@ -37,7 +37,7 @@ func NewAMQPEndpoint(uri, groupId string, logger watermill.LoggerAdapter) (*AMQP
 	}
 
 	endpoint := &AMQPEndpoint{
-		id: watermill.NewShortUUID(),
+		id:      watermill.NewShortUUID(),
 		uri:     uri,
 		groupId: groupId,
 		logger:  logger,
@@ -71,7 +71,6 @@ func (endpoint *AMQPEndpoint) Subscriber(name string) (message.Subscriber, error
 
 // Return `Publisher` for this `Endpoint`. The `Publisher` will only created once and reused.
 func (endpoint *AMQPEndpoint) Publisher() (message.Publisher, error) {
-
 	if endpoint.publisher == nil {
 		publisher, err := amqp.NewPublisher(amqp.NewDurablePubSubConfig(endpoint.uri, nil), endpoint.logger)
 		if err != nil {
@@ -84,64 +83,86 @@ func (endpoint *AMQPEndpoint) Publisher() (message.Publisher, error) {
 	return endpoint.publisher, nil
 }
 
-func (endpoint *AMQPEndpoint) RPCSubscriber() (message.Subscriber, error) {
+func (endpoint *AMQPEndpoint) RPCServerSubscriber() (message.Subscriber, error) {
 	// configure amqp topic
 	topicConfig := amqp.NewDurablePubSubConfig(endpoint.uri, func(topic string) string {
 		return topic
 	})
 	topicConfig.Exchange.Type = "topic"
-	topicConfig.Publish.GenerateRoutingKey = func(topic string) string {
+	topicConfig.QueueBind.GenerateRoutingKey = func(topic string) string {
 		// set request routing key
 		return RoutingKeyRequestPrefix + topic
 	}
 
 	// configure topic subscriber, we would want to reuse subscriber for other topics
-	if endpoint.topicSubscriber == nil {
+	if endpoint.rpcServerSubscriber == nil {
 		sub, err := amqp.NewSubscriber(topicConfig, endpoint.logger)
 		if err != nil {
 			return nil, err
 		}
-		endpoint.topicSubscriber = sub
+		endpoint.rpcServerSubscriber = sub
 	}
 
-	return endpoint.topicSubscriber, nil
+	return endpoint.rpcServerSubscriber, nil
 }
 
-func (endpoint *AMQPEndpoint) RPCPublisher() (message.Publisher, error) {
+func (endpoint *AMQPEndpoint) RPCServerPublish(topic string, msg *message.Message) error {
 	// configure amqp topic
 	topicConfig := amqp.NewDurablePubSubConfig(endpoint.uri, func(topic string) string {
 		return topic
 	})
 	topicConfig.Exchange.Type = "topic"
-	topicConfig.Publish.GenerateRoutingKey = func(topic string) string {
+	topicConfig.Publish.GenerateRoutingKey = func(t string) string {
 		// set reply routing key
-		return RoutingKeyReplyPrefix + topic
+		return fmt.Sprintf("%s%s.%s", RoutingKeyReplyPrefix, topic, msg.Metadata.Get(HeaderReplyTo))
 	}
 
-	// configure reply publisher, we would want to reuse publisher for other topics
-	if endpoint.topicPublisher == nil {
-		publisher, err := amqp.NewPublisher(topicConfig, endpoint.logger)
+	// configure reply publisher, we can't reuse publisher since the routing key is dynamic
+	publisher, err := amqp.NewPublisher(topicConfig, endpoint.logger)
+	if err != nil {
+		return err
+	}
+
+	defer publisher.Close()
+
+	return publisher.Publish(topic, msg)
+}
+
+func (endpoint *AMQPEndpoint) SendAndWait(topic string, request *message.Message) (*message.Message, error) {
+	queueName := fmt.Sprintf("%s_%s", topic, RandString(8))
+
+	if endpoint.rpcClientPublisher == nil {
+		// configure amqp topic
+		topicConfig := amqp.NewDurablePubSubConfig(endpoint.uri, func(topic string) string {
+			return topic
+		})
+		topicConfig.Exchange.Type = "topic"
+		topicConfig.Publish.GenerateRoutingKey = func(topic string) string {
+			// set request routing key
+			return RoutingKeyRequestPrefix + topic
+		}
+		pub, err := amqp.NewPublisher(topicConfig, endpoint.logger)
 		if err != nil {
 			return nil, err
 		}
-		endpoint.topicPublisher = publisher
+		endpoint.rpcClientPublisher = pub
 	}
 
-	return endpoint.topicPublisher, nil
-}
-
-func (endpoint *AMQPEndpoint) SendAndWait(name string, request *message.Message) (*message.Message, error) {
-	queueName := fmt.Sprintf("%s_%s", name, RandString(8))
-
-	pub, err := endpoint.RPCPublisher()
-	if err != nil {
-		return nil, err
-	}
+	//
 
 	// configure subscriber for reply
 	// since it's just temporary queue, queue should be transient and auto delete
 	amqpConfig := amqp.NewNonDurableQueueConfig(endpoint.uri)
+	amqpConfig.Exchange.GenerateName = func(t string) string {
+		return topic
+	}
+	amqpConfig.Exchange.Type = "topic"
+	amqpConfig.Exchange.Durable = true
 	amqpConfig.Queue.AutoDelete = true
+	amqpConfig.QueueBind.GenerateRoutingKey = func(t string) string {
+		// set request routing key
+		return fmt.Sprintf("%s%s.%s", RoutingKeyReplyPrefix, topic, queueName)
+	}
 
 	sub, err := amqp.NewSubscriber(amqpConfig, endpoint.logger)
 	if err != nil {
@@ -154,7 +175,7 @@ func (endpoint *AMQPEndpoint) SendAndWait(name string, request *message.Message)
 		if err != nil {
 			// log the error, since we got the reply this should not cause the program to stop
 			endpoint.logger.Error("failed to close temporary queue", err, watermill.LogFields{
-				"topic": name,
+				"topic": topic,
 				"queue": queueName,
 			})
 		}
@@ -167,7 +188,7 @@ func (endpoint *AMQPEndpoint) SendAndWait(name string, request *message.Message)
 
 	// configure to send request to topic
 	request.Metadata.Set(HeaderReplyTo, queueName)
-	pub.Publish(name, request)
+	endpoint.rpcClientPublisher.Publish(topic, request)
 
 	// wait for reply
 	reply := <-messages
@@ -187,23 +208,23 @@ func (endpoint *AMQPEndpoint) RequestReplySupport(name string) (message.Subscrib
 	}
 
 	// configure topic subscriber, we would want to reuse subscriber for other topics
-	if endpoint.topicSubscriber == nil {
+	if endpoint.rpcServerSubscriber == nil {
 		sub, err := amqp.NewSubscriber(topicConfig, endpoint.logger)
 		if err != nil {
 			return nil, nil, err
 		}
-		endpoint.topicSubscriber = sub
+		endpoint.rpcServerSubscriber = sub
 	}
 
 	// configure reply publisher, we would want to reuse publisher for other topics
-	if endpoint.topicPublisher == nil {
+	if endpoint.rpcServerPublisher == nil {
 		publisher, err := amqp.NewPublisher(topicConfig, endpoint.logger)
 		if err != nil {
 			return nil, nil, err
 		}
-		endpoint.topicPublisher = publisher
+		endpoint.rpcServerPublisher = publisher
 	}
 
-	return endpoint.topicSubscriber, endpoint.requestReplyFn(name), nil
+	return endpoint.rpcServerSubscriber, endpoint.requestReplyFn(name), nil
 }
 */

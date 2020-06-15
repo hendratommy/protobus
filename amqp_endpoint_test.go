@@ -26,7 +26,7 @@ func (suite *AMQPEndpointTestSuite) SetupTest() {
 	suite.amqpUri = "amqp://root:root@localhost:5672"
 	suite.groupId = "amqp-test"
 	suite.logger = watermill.NopLogger{}
-	//suite.logger = watermill.NewStdLogger(true, true)
+	//suite.logger = watermill.NewStdLogger(true, false)
 }
 
 func TestAMQPEndpointTestSuite(t *testing.T) {
@@ -381,7 +381,6 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_RequestResponse() {
 			Message: fmt.Sprintf("hello %s", data.Name),
 			Sum:     sum,
 		}
-
 		return resp, nil
 	})
 
@@ -408,7 +407,6 @@ func (suite *AMQPEndpointTestSuite) TestAMQPEndpoint_RequestResponse() {
 			assert.NotZero(suite.T(), resp.Sum)
 			wg.Done()
 		}(data)
-
 	}
 
 	wg.Wait()
