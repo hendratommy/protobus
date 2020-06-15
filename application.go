@@ -92,32 +92,11 @@ func (app *Application) Send(topic string, payload interface{}, metadata ...map[
 	return err
 }
 
-func (app *Application) sendReply(queue string, payload interface{}, metadata ...map[string]string) error {
-	publisher, err := app.endpoint.ReplyPublisher()
-	if err != nil {
-		return err
-	}
-
-	b, err := app.marshaler.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	msg := message.NewMessage(watermill.NewUUID(), b)
-
-	if metadata != nil && len(metadata) > 0 {
-		msg.Metadata = metadata[0]
-	}
-
-	err = publisher.Publish(queue, msg)
-	return err
-}
-
 // Send message and wait for reply
 func (app *Application) SendAndWait(topic string, payload interface{}, metadata ...map[string]string) (Ctx, error) {
-	publisher, err := app.endpoint.Publisher()
-	if err != nil {
-		return nil, err
+	rpcClient, ok := app.endpoint.(RPCClientEndpoint)
+	if !ok {
+		return nil, fmt.Errorf("endpoint doesn't implement RPCClientEndpoint: %+v", app.endpoint.String())
 	}
 
 	b, err := app.marshaler.Marshal(payload)
@@ -131,47 +110,27 @@ func (app *Application) SendAndWait(topic string, payload interface{}, metadata 
 		msg.Metadata = metadata[0]
 	}
 
-	queueName := fmt.Sprintf("%s_%s", topic, RandString(8))
-	sub, err := app.endpoint.ReplySubscriber()
-	if err != nil {
-		return nil, err
-	}
-	messages, err := sub.Subscribe(context.Background(), queueName)
+	reply, err := rpcClient.SendAndWait(topic, msg)
 	if err != nil {
 		return nil, err
 	}
 
-	msg.Metadata.Set(HeaderReplyTo, queueName)
-	err = publisher.Publish(topic, msg)
-	if err != nil {
-		return nil, err
-	}
-
-	//var done = false
-	//var replyCh = make(chan *message.Message)
-	//for msg := range messages {
-	//	replyCh <-msg
-	//}
-
-	reply := <-messages
 	c := &defaultCtx{
 		app:     app,
 		Message: reply,
 	}
-	// close immediately after get response
-	sub.Close()
 	return c, nil
 
 }
 
 // Event handler
 func (app *Application) OnEvent(event string, handler func(Ctx) error) error {
-	publisher, err := app.endpoint.Publisher()
+	subscriber, err := app.endpoint.Subscriber(event)
 	if err != nil {
 		return err
 	}
 
-	subscriber, err := app.endpoint.Subscriber(event)
+	publisher, err := app.endpoint.Publisher()
 	if err != nil {
 		return err
 	}
@@ -225,16 +184,74 @@ func (app *Application) OnEvent(event string, handler func(Ctx) error) error {
 
 // Request-reply pattern handler, return payload as reply is expected
 func (app *Application) OnRequest(topic string, handler func(Ctx) (interface{}, error)) error {
-	eh := func(c Ctx) error {
-		reply, err := handler(c)
-		if err != nil {
-			return err
-		}
-		replyTo := c.Header(HeaderReplyTo)
-		if replyTo == "" {
-			return fmt.Errorf("cannot send reply since header %s is missing", HeaderReplyTo)
-		}
-		return app.sendReply(replyTo, reply, c.Headers())
+	rpcServerEndpoint, ok := app.endpoint.(RPCServerEndpoint)
+	if !ok {
+		return fmt.Errorf("endpoint doesn't implement RPCServerEndpoint: %+v", app.endpoint.String())
 	}
-	return app.OnEvent(topic, eh)
+
+	subscriber, err := rpcServerEndpoint.RPCServerSubscriber()
+	if err != nil {
+		return err
+	}
+
+	publisher, err := rpcServerEndpoint.RPCServerPublisher()
+	if err != nil {
+		return err
+	}
+
+	routeId := fmt.Sprintf("%s_%s", topic, RandString())
+
+	// we need to returned handler to attach DLQ middleware, so each event can have their own DLQ
+	internalHandler := app.router.AddHandler(
+		routeId,
+		topic,
+		subscriber,
+		"",
+		publisher,
+		func(msg *message.Message) ([]*message.Message, error) {
+			// set handlerName to context
+			msg.SetContext(context.WithValue(msg.Context(), ContextRouteId, routeId))
+
+			// just for test
+			//msg.Metadata["RouteId"] = routeId
+
+			c := &defaultCtx{
+				app:     app,
+				Message: msg,
+			}
+			reply, err := handler(c)
+			if err != nil {
+				return nil, err
+			}
+			replyTo := c.Header(HeaderReplyTo)
+			if replyTo == "" {
+				return nil, fmt.Errorf("cannot send reply since header %s is missing", HeaderReplyTo)
+			}
+			c.
+			publisher.Publish(topic, reply)
+			return nil, nil
+		},
+	)
+
+	if app.errorHandler != nil {
+		// add error handler to handler middleware
+		if app.errorHandler.DeadLetterNameFunc != nil {
+			// configure DLQ
+			dlqName := topic + "-DLQ"
+			dlq, err := DeadLetterQueue(publisher, dlqName)
+			if err != nil {
+				return err
+			}
+			internalHandler.AddMiddleware(dlq)
+		}
+		if app.errorHandler.Retry != nil {
+			// configure retry
+			retry := *app.errorHandler.Retry
+			internalHandler.AddMiddleware(retry.Middleware)
+		}
+		// add Recoverer after retry, so when panic occurs will be retried
+		internalHandler.AddMiddleware(middleware.Recoverer)
+	}
+
+	return nil
 }
